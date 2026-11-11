@@ -417,3 +417,44 @@ def test_merge_keeps_url_added_playlists():
     merged = merge_saved_playlists(remote, saved)
     assert [item["id"] for item in merged] == ["liked-songs", "37i9dQZF1EVHGWrwldPRtj"]
     assert merged[1]["pinned"] is True
+
+
+def test_playlist_search_uses_cached_user_token_and_skips_unavailable_results():
+    session = Mock()
+    session.get.return_value.json.return_value = {
+        "playlists": {
+            "items": [None, {"id": "playlist", "name": "Chill Mix", "owner": {"display_name": "Spotify"}}],
+            "next": "https://api.spotify.com/v1/search?offset=20",
+        },
+    }
+    session.get.return_value.status_code = 200
+    client = SpotifyClient("cid", session=session, load=lambda: {
+        "client_id": "cid", "access_token": "cached", "refresh_token": "refresh",
+        "expires_at": time.time() + 600,
+        "scope": FULL_SCOPES,
+    })
+    playlists, has_next = client.search_playlists("  chill  ", page=1)
+
+    assert [(item["name"], item["owner"]) for item in playlists] == [("Chill Mix", "Spotify")]
+    assert has_next
+    assert session.get.call_args.args[0].endswith("/search")
+    assert session.get.call_args.kwargs["params"] == {
+        "q": "chill", "type": "playlist", "limit": 10, "offset": 10,
+    }
+    assert session.get.call_args.kwargs["headers"]["Authorization"] == "Bearer cached"
+
+
+def test_playlist_search_includes_editorial_result_missing_from_api():
+    client = SpotifyClient("cid")
+    client._get = Mock(return_value={"playlists": {"items": [
+        {"id": "fan-playlist", "name": "Bedroom Pop", "owner": {"display_name": "Fan"}},
+    ]}})
+
+    results, _ = client.search_playlists("bedroom pop")
+
+    assert [(item["id"], item["owner"]) for item in results] == [
+        ("37i9dQZF1DXcxvFzl58uP7", "Spotify"),
+        ("fan-playlist", "Fan"),
+    ]
+    next_page, _ = client.search_playlists("bedroom pop", page=1)
+    assert all(item["owner"] != "Spotify" for item in next_page)

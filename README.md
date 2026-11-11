@@ -38,6 +38,12 @@ bash scripts/build_app.sh
 open ~/Applications/SpotifyToMusic.app
 ```
 
+## Finding and syncing playlists
+
+Open **Search Spotify**, enter a playlist name, and choose **Add to sync** on a result. Search uses your existing Spotify sign-in. Search includes a small list of Spotify editorial playlists, such as Bedroom Pop, that can be missing from the developer API. Use **Open Spotify search** to look for other editorial playlists, then add their share links from Library.
+
+Sync can download up to three missing tracks at once. Music.app imports and playlist updates run in order.
+
 ## Unmatched songs
 
 If CSVMusic cannot confidently match a track, **Fix unmatched…** opens with suggested YouTube candidates (score + title). Pick one or paste your own URL. Overrides are stored at:

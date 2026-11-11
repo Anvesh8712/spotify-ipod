@@ -5,16 +5,21 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shlex
+import sys
 import time
 import unicodedata
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
 from spotify_ipod.paths import support_dir, unmatched_path
 from spotify_ipod.state import track_key
 
 ProgressFn = Callable[[str], None]
+DOWNLOAD_WORKERS = 3
 
 
 @dataclass
@@ -313,6 +318,7 @@ def _download_with_csvmusic_core(
     """Match + download using CSVMusic's own modules, with live progress."""
     _require_csvmusic()
     from csvmusic.core.downloader import download_m4a, sanitize_name, tag_file, yt_thumbnail_bytes
+    from csvmusic.core.paths import INTERNAL_YTDLP, ytdlp_path
     from csvmusic.core.ytmusic_match import RATE_LIMIT_S, find_best
     from ytmusicapi import YTMusic
 
@@ -321,76 +327,116 @@ def _download_with_csvmusic_core(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(tracks)
-    on_progress(f"CSVMusic: matching & downloading {total} track(s) for {playlist_name}…")
+    on_progress(
+        f"CSVMusic: matching {total} track(s) for {playlist_name} with up to {DOWNLOAD_WORKERS} concurrent downloads…"
+    )
     yt = YTMusic()
     result = BatchDownloadResult()
 
-    for index, track in enumerate(tracks, start=1):
-        key = track_key(track)
-        label = f"{track.get('artists')} - {track.get('title')}"
-        on_progress(f"CSVMusic [{index}/{total}] {label}")
-
-        existing = _find_downloaded_file(dest_dir, track)
-        if existing and existing.exists() and existing.stat().st_size > 0:
-            on_progress(f"  already on disk → {existing.name}")
-            result.files[key] = existing
-            continue
-
-        video_id = overrides.get(key, "")
-        csv_track = _to_csvmusic_track(track, playlist_name, index)
-        if video_id:
-            on_progress(f"  manual override → {video_id}")
-        else:
-            try:
-                match, conf, options = find_best(yt, csv_track)
-            except Exception as exc:
-                reason = f"match error: {exc}"
-                on_progress(f"  {reason} — open Fix unmatched to pick a YouTube link")
-                _log().warning("CSVMusic match failed for %s: %s", label, exc)
-                result.failed.append(_fail_item(track, reason))
-                time.sleep(RATE_LIMIT_S)
-                continue
-            time.sleep(RATE_LIMIT_S)
-            candidates = _candidate_rows(options)
-            if match is None:
-                if candidates:
-                    reason = f"low confidence ({conf:.2f}) — pick a candidate or paste a YouTube link"
-                else:
-                    reason = "no confident YouTube Music match"
-                on_progress(f"  {reason}")
-                result.failed.append(
-                    _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
-                )
-                continue
-            video_id = str(match.get("videoId") or "")
-            if not video_id:
-                reason = "match missing video id"
-                on_progress(f"  {reason} — skipped")
-                result.failed.append(
-                    _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
-                )
-                continue
-            on_progress(f"  matched ({conf:.2f}) → downloading…")
-
-        base = f"{csv_track['artists']} - {csv_track['title']}"
-        try:
-            path = download_m4a(video_id, dest_dir, base)
-            cover = None
+    def download(video_id: str, csv_track: dict[str, Any], base: str, executable: str) -> Path:
+        with TemporaryDirectory(prefix=".download-", dir=dest_dir) as scratch:
+            path = download_m4a(video_id, Path(scratch), base, yt_dlp_bin=executable)
+            if not path.is_file() or path.stat().st_size == 0:
+                raise DownloadError("CSVMusic returned an empty or missing file")
             try:
                 cover = yt_thumbnail_bytes(video_id)
             except Exception:
                 cover = None
             try:
                 tag_file(path, csv_track, cover)
-            except Exception as tag_exc:
-                _log().warning("CSVMusic tag failed for %s: %s", label, tag_exc)
-            on_progress(f"  downloaded → {path.name}")
-            result.files[key] = path
+            except Exception as exc:
+                _log().warning("CSVMusic tag failed for %s: %s", base, exc)
+            target = dest_dir / path.name
+            path.replace(target)
+            return target
+
+    pending: dict[str, tuple[dict[str, Any], Future[Path]]] = {}
+
+    def collect(filename: str) -> None:
+        track, future = pending.pop(filename)
+        try:
+            path = future.result()
         except Exception as exc:
             reason = f"download failed: {exc}"
-            on_progress(f"  {reason}")
-            _log().warning("CSVMusic download failed for %s: %s", label, exc)
+            on_progress(f"  {filename}: {reason}")
+            _log().warning("CSVMusic download failed for %s: %s", filename, exc)
             result.failed.append(_fail_item(track, reason))
+        else:
+            on_progress(f"  downloaded → {path.name}")
+            result.files[track_key(track)] = path
+
+    with TemporaryDirectory(prefix="spotify-ipod-tools-") as tools_dir, ThreadPoolExecutor(
+        max_workers=DOWNLOAD_WORKERS, thread_name_prefix="song-download"
+    ) as executor:
+        # CSVMusic's in-process fallback redirects process-wide stdout and stderr.
+        # Use the active interpreter even when the installed bundle has moved.
+        executable = ytdlp_path()
+        if executable == INTERNAL_YTDLP or Path(executable).parent == Path(sys.executable).parent:
+            launcher = Path(tools_dir) / "yt-dlp"
+            launcher.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m yt_dlp "$@"\n', encoding="utf-8")
+            launcher.chmod(0o700)
+            executable = str(launcher)
+
+        for index, track in enumerate(tracks, start=1):
+            key = track_key(track)
+            label = f"{track.get('artists')} - {track.get('title')}"
+            on_progress(f"CSVMusic [{index}/{total}] {label}")
+
+            csv_track = _to_csvmusic_track(track, playlist_name, index)
+            base = f"{csv_track['artists']} - {csv_track['title']}"
+            filename = f"{sanitize_name(base)}.m4a".casefold()
+            if filename in pending:
+                collect(filename)
+            existing = _find_downloaded_file(dest_dir, track)
+            if existing and existing.exists() and existing.stat().st_size > 0:
+                on_progress(f"  already on disk → {existing.name}")
+                result.files[key] = existing
+                continue
+
+            video_id = overrides.get(key, "")
+            if video_id:
+                on_progress(f"  manual override → {video_id}")
+            else:
+                try:
+                    match, conf, options = find_best(yt, csv_track)
+                except Exception as exc:
+                    reason = f"match error: {exc}"
+                    on_progress(f"  {reason} — open Fix unmatched to pick a YouTube link")
+                    _log().warning("CSVMusic match failed for %s: %s", label, exc)
+                    result.failed.append(_fail_item(track, reason))
+                    time.sleep(RATE_LIMIT_S)
+                    continue
+                time.sleep(RATE_LIMIT_S)
+                candidates = _candidate_rows(options)
+                if match is None:
+                    if candidates:
+                        reason = f"low confidence ({conf:.2f}) — pick a candidate or paste a YouTube link"
+                    else:
+                        reason = "no confident YouTube Music match"
+                    on_progress(f"  {reason}")
+                    result.failed.append(
+                        _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
+                    )
+                    continue
+                video_id = str(match.get("videoId") or "")
+                if not video_id:
+                    reason = "match missing video id"
+                    on_progress(f"  {reason} — skipped")
+                    result.failed.append(
+                        _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
+                    )
+                    continue
+                on_progress(f"  matched ({conf:.2f}) → downloading…")
+
+            if len(pending) == DOWNLOAD_WORKERS:
+                wait([future for _, future in pending.values()], return_when=FIRST_COMPLETED)
+            for completed, (_, future) in list(pending.items()):
+                if future.done():
+                    collect(completed)
+            pending[filename] = (track, executor.submit(download, video_id, csv_track, base, executable))
+
+        for filename in list(pending):
+            collect(filename)
 
     on_progress(f"CSVMusic done for {playlist_name}: {len(result.files)}/{total} downloaded")
     return result

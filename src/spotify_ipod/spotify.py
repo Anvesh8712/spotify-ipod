@@ -47,6 +47,14 @@ EMBED_HEADERS = {
 }
 
 
+# Public editorial playlist links verified on Spotify. Development-mode search can omit them.
+SPOTIFY_EDITORIAL_PLAYLISTS = (
+    ("37i9dQZF1DXcxvFzl58uP7", "Bedroom Pop"),
+    ("37i9dQZF1DWWQRwui0ExPn", "lofi beats"),
+    ("37i9dQZF1DWVmX5LMTOKPw", "Today's Top Hits Presents Best Hit Songs of 2025"),
+)
+
+
 def has_required_scopes(scope: str, required: tuple[str, ...] = DEFAULT_SCOPES) -> bool:
     granted = set((scope or "").split())
     return set(required) <= granted
@@ -375,8 +383,10 @@ class SpotifyClient:
         )
         return self.save_tokens(tokens).access_token
 
-    def _get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        token = self.get_access_token(interactive=True)
+    def _get(
+        self, path: str, *, params: dict[str, Any] | None = None, interactive: bool = True,
+    ) -> dict[str, Any]:
+        token = self.get_access_token(interactive=interactive)
         try:
             response = self.session.get(
                 f"{API_BASE_URL}{path}",
@@ -432,6 +442,30 @@ class SpotifyClient:
         rest.sort(key=_playlist_sort_key)
         return head + rest
 
+    def search_playlists(self, query: str, *, page: int = 0) -> tuple[list[dict[str, Any]], bool]:
+        query = query.strip()
+        if not query:
+            return [], False
+        playlists = {
+            playlist_id: {"id": playlist_id, "name": name, "owner": "Spotify"}
+            for playlist_id, name in SPOTIFY_EDITORIAL_PLAYLISTS
+            if page == 0 and query.casefold() in name.casefold()
+        }
+        offset = page * 10
+        data = self._get(
+            "/search",
+            params={"q": query, "type": "playlist", "limit": 10, "offset": offset},
+            interactive=False,
+        )
+        results = data.get("playlists")
+        if not isinstance(results, dict) or not isinstance(results.get("items"), list):
+            raise SpotifyError("Spotify returned an unexpected playlist search response.")
+        for item in results["items"]:
+            playlist = _user_playlist(item)
+            if playlist:
+                playlists.setdefault(playlist["id"], playlist)
+        return list(playlists.values()), bool(results.get("next")) and offset < 1000
+
     def fetch_playlist(self, playlist_id: str) -> dict[str, Any]:
         if is_liked_songs_id(playlist_id):
             return self._fetch_liked_songs()
@@ -454,7 +488,7 @@ class SpotifyClient:
             extra_params={"additional_types": "track", "market": "from_token"},
         )
         reported = _playlist_item_total(summary)
-        if not tracks and reported:
+        if not tracks and (reported or "items" not in summary):
             return fetch_embed_playlist(playlist_id, session=self.session)
         return {
             "id": playlist_id,
@@ -710,7 +744,7 @@ def _spotify_http_error(response: requests.Response, path: str) -> str:
         elif error:
             detail = str(error)
         detail = detail or str(payload.get("error_description") or "")
-    if response.status_code == 403:
+    if response.status_code == 403 and path.startswith("/playlists/"):
         return (
             detail
             or "Spotify denied access to this playlist. Developer apps can only read songs from playlists you own."

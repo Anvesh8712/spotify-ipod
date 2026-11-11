@@ -107,3 +107,39 @@ def test_unmatched_roundtrip_keeps_candidates(tmp_path: Path):
     assert loaded[0]["sp_id"] == "abc"
     assert loaded[0]["confidence"] == 0.55
     assert loaded[0]["candidates"][0]["video_id"] == "dQw4w9WgXcQ"
+
+
+def test_download_tracks_overlaps_downloads_and_only_publishes_successes(tmp_path, monkeypatch):
+    from threading import Barrier
+
+    import pytest
+
+    downloader = pytest.importorskip("csvmusic.core.downloader")
+    from csvmusic.core import paths
+
+    together = Barrier(3)
+    titles = ("One", "Two", "Three")
+    tracks = [
+        {"title": title, "artists": "Artist", "sp_id": title}
+        for title in titles
+    ]
+
+    def fake_download(video_id, folder, base, *, yt_dlp_bin):
+        together.wait(timeout=5)
+        path = folder / f"{base}.m4a"
+        path.write_text("audio")
+        if video_id == "Three":
+            raise OSError("download interrupted")
+        return path
+
+    monkeypatch.setattr(paths, "ytdlp_path", lambda: paths.INTERNAL_YTDLP)
+    monkeypatch.setattr(downloader, "download_m4a", fake_download)
+    monkeypatch.setattr(downloader, "yt_thumbnail_bytes", lambda _: None)
+    monkeypatch.setattr(downloader, "tag_file", lambda *_: None)
+    result = download_tracks(tracks, tmp_path, "Mix", overrides={title: title for title in titles})
+
+    assert set(result.files) == {"One", "Two"}
+    assert [item["sp_id"] for item in result.failed] == ["Three"]
+    assert sorted(path.name for path in (tmp_path / "Mix").iterdir()) == [
+        "Artist - One.m4a", "Artist - Two.m4a",
+    ]
