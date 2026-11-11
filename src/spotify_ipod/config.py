@@ -7,12 +7,8 @@ from typing import Any
 from spotify_ipod.paths import config_path, library_dir
 
 
-DEFAULT_AAC_BITRATE = "256k"
-DEFAULT_SAMPLE_RATE = 44100
-DEFAULT_CHANNELS = 2
 DEFAULT_SCHEDULE_HOURS = 6
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/callback"
-DEFAULT_CONFIDENCE_MIN = 0.6
 
 
 @dataclass
@@ -35,12 +31,7 @@ class AppConfig:
     redirect_uri: str = DEFAULT_REDIRECT_URI
     playlists: list[PlaylistConfig] = field(default_factory=list)
     output_dir: str = ""
-    aac_bitrate: str = DEFAULT_AAC_BITRATE
-    sample_rate: int = DEFAULT_SAMPLE_RATE
-    channels: int = DEFAULT_CHANNELS
     schedule_hours: int = DEFAULT_SCHEDULE_HOURS
-    confidence_min: float = DEFAULT_CONFIDENCE_MIN
-    cookies_from_chrome: bool = True
 
     def enabled_playlists(self) -> list[PlaylistConfig]:
         return [item for item in self.playlists if item.enabled]
@@ -68,12 +59,7 @@ def config_from_dict(data: dict[str, Any] | None) -> AppConfig:
         redirect_uri=str(raw.get("redirect_uri") or DEFAULT_REDIRECT_URI),
         playlists=playlists,
         output_dir=str(raw.get("output_dir") or ""),
-        aac_bitrate=str(raw.get("aac_bitrate") or DEFAULT_AAC_BITRATE),
-        sample_rate=int(raw.get("sample_rate") or DEFAULT_SAMPLE_RATE),
-        channels=int(raw.get("channels") or DEFAULT_CHANNELS),
         schedule_hours=int(raw.get("schedule_hours") or DEFAULT_SCHEDULE_HOURS),
-        confidence_min=float(raw.get("confidence_min") or DEFAULT_CONFIDENCE_MIN),
-        cookies_from_chrome=bool(raw.get("cookies_from_chrome", True)),
     )
 
 

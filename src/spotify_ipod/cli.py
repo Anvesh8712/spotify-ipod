@@ -17,7 +17,7 @@ from spotify_ipod.state import load_state
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="spotify-ipod",
-        description="Sync Spotify playlists into Music.app as iPod-safe AAC tracks.",
+        description="Sync Spotify playlists into Music.app via CSVMusic + Apple AAC.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -94,7 +94,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"State:  {state_path()}")
     print(f"Client ID: {'set' if config.spotify_client_id else 'missing'}")
     print(f"Output: {config.resolved_output_dir()}")
-    print(f"AAC: {config.aac_bitrate} {config.sample_rate} Hz {config.channels} ch")
+    print("Download: CSVMusic  ·  Convert: Music AAC Encoder")
     print(f"Schedule: every {config.schedule_hours}h  agent={'installed' if agent_installed() else 'not installed'}")
     if agent_installed():
         print(f"Agent plist: {launch_agent_plist_path()}")

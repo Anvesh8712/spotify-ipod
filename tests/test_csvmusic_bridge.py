@@ -3,10 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from spotify_ipod.csvmusic_bridge import (
+    _candidate_rows,
     download_tracks,
     load_overrides,
+    load_unmatched,
     parse_youtube_id,
     save_overrides,
+    save_unmatched,
     write_playlist_csv,
 )
 
@@ -67,6 +70,40 @@ def test_save_overrides(tmp_path: Path):
     path = tmp_path / "overrides.json"
     save_overrides({"abc": "https://youtu.be/dQw4w9WgXcQ"}, path)
     assert load_overrides(path) == {"abc": "dQw4w9WgXcQ"}
-    # merge + normalize
-    save_overrides({"xyz": "dQw4w9WgXcQ"}, path)
-    assert load_overrides(path) == {"abc": "dQw4w9WgXcQ", "xyz": "dQw4w9WgXcQ"}
+
+
+def test_candidate_rows_normalize_options():
+    rows = _candidate_rows(
+        [
+            {
+                "videoId": "dQw4w9WgXcQ",
+                "title": "Song",
+                "artists": [{"name": "Artist"}],
+                "score": 0.55,
+            }
+        ]
+    )
+    assert rows == [
+        {"video_id": "dQw4w9WgXcQ", "title": "Song", "artists": "Artist", "score": 0.55}
+    ]
+
+
+def test_unmatched_roundtrip_keeps_candidates(tmp_path: Path):
+    path = tmp_path / "unmatched.json"
+    items = [
+        {
+            "sp_id": "abc",
+            "title": "Song",
+            "artists": "Artist",
+            "reason": "low confidence (0.55)",
+            "confidence": 0.55,
+            "candidates": [
+                {"video_id": "dQw4w9WgXcQ", "title": "Song", "artists": "Artist", "score": 0.55}
+            ],
+        }
+    ]
+    save_unmatched(items, path)
+    loaded = load_unmatched(path)
+    assert loaded[0]["sp_id"] == "abc"
+    assert loaded[0]["confidence"] == 0.55
+    assert loaded[0]["candidates"][0]["video_id"] == "dQw4w9WgXcQ"

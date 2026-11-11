@@ -110,7 +110,7 @@ class SetupApp(tk.Tk):
             "Create a Spotify app at https://developer.spotify.com/dashboard\n"
             "Add the Redirect URI exactly, copy the Client ID, then Sign in with Chrome.\n"
             "Downloads use CSVMusic 1.7.7; Music converts with AAC Encoder.\n"
-            "If songs fail to match, click Fix unmatched… and paste YouTube links."
+            "If songs are low-confidence or unmatched, click Fix unmatched… to pick a YouTube candidate or paste a link."
         )
 
     def _load_into_form(self) -> None:

@@ -20,7 +20,7 @@ ProgressFn = Callable[[str], None]
 @dataclass
 class BatchDownloadResult:
     files: dict[str, Path] = field(default_factory=dict)
-    failed: list[dict[str, str]] = field(default_factory=list)
+    failed: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DownloadError(RuntimeError):
@@ -85,7 +85,28 @@ def save_overrides(updates: dict[str, str], path: Path | None = None) -> dict[st
     return current
 
 
-def load_unmatched(path: Path | None = None) -> list[dict[str, str]]:
+def _clean_candidates(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for cand in raw:
+        if not isinstance(cand, dict):
+            continue
+        video_id = str(cand.get("video_id") or "").strip()
+        if not video_id:
+            continue
+        rows.append(
+            {
+                "video_id": video_id,
+                "title": str(cand.get("title") or ""),
+                "artists": str(cand.get("artists") or ""),
+                "score": float(cand.get("score") or 0),
+            }
+        )
+    return rows
+
+
+def load_unmatched(path: Path | None = None) -> list[dict[str, Any]]:
     target = path or unmatched_path()
     if not target.exists():
         return []
@@ -95,7 +116,7 @@ def load_unmatched(path: Path | None = None) -> list[dict[str, str]]:
         return []
     if not isinstance(data, list):
         return []
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -108,12 +129,14 @@ def load_unmatched(path: Path | None = None) -> list[dict[str, str]]:
                 "title": str(item.get("title") or ""),
                 "artists": str(item.get("artists") or ""),
                 "reason": str(item.get("reason") or "unmatched"),
+                "confidence": float(item.get("confidence") or 0),
+                "candidates": _clean_candidates(item.get("candidates")),
             }
         )
     return out
 
 
-def save_unmatched(items: list[dict[str, str]], path: Path | None = None) -> None:
+def save_unmatched(items: list[dict[str, Any]], path: Path | None = None) -> None:
     target = path or unmatched_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = []
@@ -129,6 +152,8 @@ def save_unmatched(items: list[dict[str, str]], path: Path | None = None) -> Non
                 "title": str(item.get("title") or ""),
                 "artists": str(item.get("artists") or ""),
                 "reason": str(item.get("reason") or "unmatched"),
+                "confidence": float(item.get("confidence") or 0),
+                "candidates": _clean_candidates(item.get("candidates")),
             }
         )
     target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -230,12 +255,50 @@ def _to_csvmusic_track(track: dict[str, Any], playlist_name: str, position: int)
     }
 
 
-def _fail_item(track: dict[str, Any], reason: str) -> dict[str, str]:
+def _format_artists(value: Any) -> str:
+    if isinstance(value, list):
+        names = []
+        for item in value:
+            if isinstance(item, dict):
+                names.append(str(item.get("name") or ""))
+            else:
+                names.append(str(item))
+        return ", ".join(n for n in names if n)
+    return str(value or "")
+
+
+def _candidate_rows(options: list[dict[str, Any]] | None, *, limit: int = 5) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for opt in (options or [])[:limit]:
+        video_id = str(opt.get("videoId") or "").strip()
+        if not video_id:
+            continue
+        rows.append(
+            {
+                "video_id": video_id,
+                "title": str(opt.get("title") or ""),
+                "artists": _format_artists(opt.get("artists"))
+                or str(opt.get("author") or opt.get("channel") or ""),
+                "score": float(opt.get("score") or 0),
+            }
+        )
+    return rows
+
+
+def _fail_item(
+    track: dict[str, Any],
+    reason: str,
+    *,
+    confidence: float = 0.0,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "sp_id": track_key(track),
         "title": str(track.get("title") or ""),
         "artists": str(track.get("artists") or ""),
         "reason": reason,
+        "confidence": float(confidence or 0),
+        "candidates": list(candidates or []),
     }
 
 
@@ -279,25 +342,33 @@ def _download_with_csvmusic_core(
             on_progress(f"  manual override → {video_id}")
         else:
             try:
-                match, conf, _options = find_best(yt, csv_track)
+                match, conf, options = find_best(yt, csv_track)
             except Exception as exc:
                 reason = f"match error: {exc}"
-                on_progress(f"  {reason} — open Fix unmatched to paste a YouTube link")
+                on_progress(f"  {reason} — open Fix unmatched to pick a YouTube link")
                 _log().warning("CSVMusic match failed for %s: %s", label, exc)
                 result.failed.append(_fail_item(track, reason))
                 time.sleep(RATE_LIMIT_S)
                 continue
             time.sleep(RATE_LIMIT_S)
+            candidates = _candidate_rows(options)
             if match is None:
-                reason = "no confident YouTube Music match"
-                on_progress(f"  {reason} — open Fix unmatched to paste a YouTube link")
-                result.failed.append(_fail_item(track, reason))
+                if candidates:
+                    reason = f"low confidence ({conf:.2f}) — pick a candidate or paste a YouTube link"
+                else:
+                    reason = "no confident YouTube Music match"
+                on_progress(f"  {reason}")
+                result.failed.append(
+                    _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
+                )
                 continue
             video_id = str(match.get("videoId") or "")
             if not video_id:
                 reason = "match missing video id"
                 on_progress(f"  {reason} — skipped")
-                result.failed.append(_fail_item(track, reason))
+                result.failed.append(
+                    _fail_item(track, reason, confidence=float(conf or 0), candidates=candidates)
+                )
                 continue
             on_progress(f"  matched ({conf:.2f}) → downloading…")
 
@@ -347,7 +418,6 @@ def download_tracks(
     out_dir.mkdir(parents=True, exist_ok=True)
     override_map = overrides if overrides is not None else load_overrides()
 
-    # Test / injectable path still goes through CSV + runner.
     if runner is not None:
         csv_path = out_dir / f"{_sanitize_like_csvmusic(playlist_name) or 'playlist'}.csv"
         write_playlist_csv(tracks, playlist_name, csv_path)

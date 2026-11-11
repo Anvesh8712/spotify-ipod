@@ -1,30 +1,33 @@
-"""Dialog for pasting YouTube links when CSVMusic cannot match a track."""
+"""Dialog for choosing YouTube matches when CSVMusic is not confident."""
 
 from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable
+from typing import Any, Callable
 
 from spotify_ipod.csvmusic_bridge import load_overrides, load_unmatched, parse_youtube_id, save_overrides, save_unmatched
+
+CUSTOM = "__custom__"
 
 
 class OverrideDialog(tk.Toplevel):
     def __init__(
         self,
         master: tk.Misc,
-        unmatched: list[dict[str, str]] | None = None,
+        unmatched: list[dict[str, Any]] | None = None,
         *,
         on_saved: Callable[[dict[str, str]], None] | None = None,
         on_saved_and_sync: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.title("Fix unmatched songs")
-        self.geometry("720x520")
+        self.geometry("760x560")
         self.transient(master)
         self.grab_set()
         self.on_saved = on_saved
         self.on_saved_and_sync = on_saved_and_sync
+        self.choice_vars: dict[str, tk.StringVar] = {}
         self.entries: dict[str, ttk.Entry] = {}
         self.items = list(unmatched) if unmatched is not None else load_unmatched()
         existing = load_overrides()
@@ -32,8 +35,11 @@ class OverrideDialog(tk.Toplevel):
         pad = {"padx": 10, "pady": 6}
         ttk.Label(
             self,
-            text="CSVMusic could not fetch these automatically. Paste a YouTube URL or 11-character video id, then Save & sync again.",
-            wraplength=680,
+            text=(
+                "These songs need a YouTube pick. Choose a suggested match or paste your own "
+                "YouTube URL / 11-character video id, then Save & sync again."
+            ),
+            wraplength=720,
         ).pack(anchor="w", **pad)
 
         body = ttk.Frame(self)
@@ -49,22 +55,58 @@ class OverrideDialog(tk.Toplevel):
 
         if not self.items:
             ttk.Label(inner, text="No unmatched songs right now.").pack(anchor="w")
+
         for item in self.items:
             sp_id = str(item.get("sp_id") or "")
             if not sp_id:
                 continue
-            row = ttk.Frame(inner)
-            row.pack(fill=tk.X, pady=4)
-            label = f"{item.get('artists') or '?'} — {item.get('title') or sp_id}"
+            row = ttk.LabelFrame(inner, text=f"{item.get('artists') or '?'} — {item.get('title') or sp_id}")
+            row.pack(fill=tk.X, pady=8, padx=2)
+
             reason = str(item.get("reason") or "")
-            ttk.Label(row, text=label, wraplength=420).pack(anchor="w")
-            if reason:
-                ttk.Label(row, text=reason, foreground="#666666").pack(anchor="w")
-            entry = ttk.Entry(row, width=70)
-            entry.pack(fill=tk.X, pady=2)
-            if sp_id in existing:
-                entry.insert(0, existing[sp_id])
+            confidence = float(item.get("confidence") or 0)
+            meta = reason
+            if confidence > 0 and "confidence" not in reason.lower():
+                meta = f"{reason}  (best score {confidence:.2f})" if reason else f"best score {confidence:.2f}"
+            if meta:
+                ttk.Label(row, text=meta, foreground="#555555", wraplength=680).pack(anchor="w", padx=8, pady=(4, 2))
+
+            candidates = item.get("candidates") or []
+            if not isinstance(candidates, list):
+                candidates = []
+
+            preset = existing.get(sp_id, "")
+            initial = preset or (str(candidates[0].get("video_id") or "") if candidates else CUSTOM)
+            if not initial:
+                initial = CUSTOM
+            choice = tk.StringVar(value=initial)
+            self.choice_vars[sp_id] = choice
+
+            for cand in candidates:
+                video_id = str(cand.get("video_id") or "")
+                if not video_id:
+                    continue
+                score = float(cand.get("score") or 0)
+                label = f"{score:.2f}  {cand.get('title') or video_id}"
+                artists = str(cand.get("artists") or "")
+                if artists:
+                    label = f"{label} — {artists}"
+                ttk.Radiobutton(row, text=label, variable=choice, value=video_id).pack(anchor="w", padx=12)
+
+            ttk.Radiobutton(row, text="Custom YouTube URL / video id", variable=choice, value=CUSTOM).pack(
+                anchor="w", padx=12, pady=(4, 0)
+            )
+            entry = ttk.Entry(row, width=72)
+            entry.pack(fill=tk.X, padx=12, pady=(2, 8))
+            if preset and (not candidates or all(str(c.get("video_id")) != preset for c in candidates)):
+                choice.set(CUSTOM)
+                entry.insert(0, preset)
             self.entries[sp_id] = entry
+
+            def _on_custom_focus(_event=None, sp=sp_id):
+                self.choice_vars[sp].set(CUSTOM)
+
+            entry.bind("<FocusIn>", _on_custom_focus)
 
         actions = ttk.Frame(self)
         actions.pack(fill=tk.X, **pad)
@@ -75,17 +117,31 @@ class OverrideDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.after(100, self.lift)
 
+    def _selected_video_id(self, sp_id: str) -> str:
+        choice = self.choice_vars[sp_id].get().strip()
+        if choice and choice != CUSTOM:
+            return parse_youtube_id(choice) or choice
+        raw = self.entries[sp_id].get().strip()
+        return parse_youtube_id(raw)
+
     def _save(self, *, sync: bool) -> None:
         updates: dict[str, str] = {}
         invalid = False
-        for sp_id, entry in self.entries.items():
-            raw = entry.get().strip()
-            if not raw:
+        for sp_id in self.choice_vars:
+            choice = self.choice_vars[sp_id].get().strip()
+            if choice == CUSTOM and not self.entries[sp_id].get().strip():
                 continue
-            if not parse_youtube_id(raw):
-                invalid = True
-                break
-            updates[sp_id] = raw
+            if choice and choice != CUSTOM:
+                updates[sp_id] = choice
+                continue
+            video_id = self._selected_video_id(sp_id)
+            if not video_id:
+                if self.entries[sp_id].get().strip():
+                    invalid = True
+                    break
+                continue
+            updates[sp_id] = video_id
+
         if invalid:
             messagebox.showerror(
                 "Fix unmatched",
@@ -94,7 +150,11 @@ class OverrideDialog(tk.Toplevel):
             )
             return
         if not updates:
-            messagebox.showinfo("Fix unmatched", "Paste at least one YouTube link first.", parent=self)
+            messagebox.showinfo(
+                "Fix unmatched",
+                "Pick a suggested match or paste at least one YouTube link first.",
+                parent=self,
+            )
             return
 
         save_overrides(updates)

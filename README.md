@@ -40,7 +40,7 @@ open ~/Applications/SpotifyToMusic.app
 
 ## Unmatched songs
 
-If CSVMusic cannot match a track, use **Fix unmatched…** in the app and paste a YouTube URL. Overrides are stored at:
+If CSVMusic cannot confidently match a track, **Fix unmatched…** opens with suggested YouTube candidates (score + title). Pick one or paste your own URL. Overrides are stored at:
 
 `~/Library/Application Support/spotify-ipod/overrides.json`
 
