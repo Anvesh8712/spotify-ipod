@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spotify-ipod"
+version = "0.2.0"
+description = "Sync Spotify playlists into Music.app via CSVMusic downloads and Apple AAC conversion"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.32.0",
+    "pandas>=2.2.0",
+    "yt-dlp>=2025.1.1",
+    "ytmusicapi>=1.7.4",
+    "mutagen>=1.47.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+spotify-ipod = "spotify_ipod.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spotify_ipod = ["*.applescript"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
